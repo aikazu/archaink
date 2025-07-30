@@ -56,8 +56,8 @@ Ini adalah alat yang ideal bagi pengguna yang sudah memahami konsep partisi disk
     curl -O https://raw.githubusercontent.com/aikazu/archaink/refs/heads/main/arch-install.sh
 
     # Opsi 2: Menggunakan git (jika ini adalah bagian dari repositori)
-    # git clone <URL_REPO_ANDA>
-    # cd <NAMA_FOLDER_REPO>
+    # git clone https://github.com/aikazu/archaink.git
+    # cd archaink
     ```
 4.  **Berikan izin eksekusi** pada skrip:
     ```bash
