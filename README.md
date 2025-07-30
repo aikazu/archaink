@@ -53,7 +53,7 @@ Ini adalah alat yang ideal bagi pengguna yang sudah memahami konsep partisi disk
 3.  **Unduh skrip ini**. Anda bisa menggunakan `git` untuk mengkloning repositori atau `curl` untuk mengunduh filenya saja.
     ```bash
     # Opsi 1: Menggunakan curl
-    curl -O https://path/to/your/raw/arch-install.sh
+    curl -O https://raw.githubusercontent.com/aikazu/archaink/refs/heads/main/arch-install.sh
 
     # Opsi 2: Menggunakan git (jika ini adalah bagian dari repositori)
     # git clone <URL_REPO_ANDA>
