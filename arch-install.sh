@@ -120,8 +120,7 @@ get_user_input() {
     done
     PASSWORD="$pass"
 
-    info "Pilih vendor CPU Anda:"
-    select CPU_VENDOR in "amd" "intel"; do [[ -n "$CPU_VENDOR" ]] && break || warning "Pilihan tidak valid."; done
+    # Pertanyaan vendor CPU dihapus, akan dideteksi otomatis.
 
     info "Pilih Desktop Environment:"
     select DE_CHOICE in "Hyprland" "KDE-Plasma" "GNOME"; do [[ -n "$DE_CHOICE" ]] && break || warning "Pilihan tidak valid."; done
@@ -143,7 +142,6 @@ get_user_input() {
     info "======================================================"
     echo " > Hostname:          ${HOSTNAME}"
     echo " > Username:          ${USERNAME}"
-    echo " > CPU Vendor:        ${CPU_VENDOR}"
     echo " > Desktop:           ${DE_CHOICE}"
     echo " > Driver Nvidia:     ${NVIDIA_CHOICE}"
     [[ "$NVIDIA_CHOICE" == "ya" ]] && echo " > Jenis Driver:      ${NVIDIA_DRIVER_TYPE}"
@@ -242,8 +240,30 @@ HOSTS
     info_chroot "Mengaktifkan NetworkManager..."
     systemctl enable NetworkManager
 
-    info_chroot "Menginstal microcode untuk ${CPU_VENDOR}..."
-    pacman -S --noconfirm --needed "${CPU_VENDOR}-ucode"
+    # --- Deteksi Otomatis dan Instalasi Microcode ---
+    info_chroot "Mendeteksi vendor CPU untuk instalasi microcode..."
+    CPU_VENDOR_DETECTED=$(lscpu | grep "Vendor ID" | awk '{print $3}')
+    MICROCODE_PKG=""
+    CPU_VENDOR_NAME=""
+    if [[ "$CPU_VENDOR_DETECTED" == "GenuineIntel" ]]; then
+        info_chroot "CPU Intel terdeteksi. Menginstal intel-ucode..."
+        MICROCODE_PKG="intel-ucode"
+        CPU_VENDOR_NAME="intel"
+    elif [[ "$CPU_VENDOR_DETECTED" == "AuthenticAMD" ]]; then
+        info_chroot "CPU AMD terdeteksi. Menginstal amd-ucode..."
+        MICROCODE_PKG="amd-ucode"
+        CPU_VENDOR_NAME="amd"
+    else
+        warning "Vendor CPU tidak dapat dideteksi. Melewatkan instalasi microcode."
+    fi
+
+    # Sinkronkan database paket sebelum instalasi apapun untuk menghindari error "target not found"
+    info_chroot "Menyinkronkan database paket..."
+    pacman -Sy
+
+    if [[ -n "$MICROCODE_PKG" ]]; then
+        pacman -S --noconfirm --needed "$MICROCODE_PKG"
+    fi
 
     info_chroot "Menginstal dan mengonfigurasi bootloader (systemd-boot)..."
     bootctl --path=/boot install
@@ -259,13 +279,15 @@ HOSTS
         KERNEL_OPTIONS+=" nvidia_drm.modeset=1"
     fi
 
-    cat <<BOOT_ENTRY > /boot/loader/entries/arch.conf
-title   Arch Linux
-linux   /vmlinuz-linux
-initrd  /${CPU_VENDOR}-ucode.img
-initrd  /initramfs-linux.img
-options ${KERNEL_OPTIONS}
-BOOT_ENTRY
+    # Membuat entri bootloader secara dinamis
+    echo "title   Arch Linux" > /boot/loader/entries/arch.conf
+    echo "linux   /vmlinuz-linux" >> /boot/loader/entries/arch.conf
+    # Menambahkan initrd untuk microcode hanya jika terinstal
+    if [[ -n "$CPU_VENDOR_NAME" ]]; then
+        echo "initrd  /${CPU_VENDOR_NAME}-ucode.img" >> /boot/loader/entries/arch.conf
+    fi
+    echo "initrd  /initramfs-linux.img" >> /boot/loader/entries/arch.conf
+    echo "options ${KERNEL_OPTIONS}" >> /boot/loader/entries/arch.conf
     info_chroot "Bootloader berhasil dikonfigurasi."
 
     PKGS=()
@@ -302,7 +324,8 @@ BOOT_ENTRY
             ;;
     esac
 
-    PKGS+=(neofetch htop file-roller unzip p7zip)
+    # Mengganti neofetch dengan fastfetch
+    PKGS+=(fastfetch htop file-roller unzip p7zip)
 
     info_chroot "Menginstal paket-paket yang dipilih: ${PKGS[*]}"
     pacman -S --noconfirm --needed "${PKGS[@]}"
@@ -352,8 +375,9 @@ main() {
     prepare_system
     
     info "Menyalin konfigurasi ke sistem baru dan masuk ke chroot..."
+    # Variabel CPU_VENDOR tidak perlu diekspor lagi
     export EFI_PARTITION SWAP_PARTITION ROOT_PARTITION HOME_PARTITION \
-           HOSTNAME USERNAME PASSWORD CPU_VENDOR DE_CHOICE NVIDIA_CHOICE NVIDIA_DRIVER_TYPE \
+           HOSTNAME USERNAME PASSWORD DE_CHOICE NVIDIA_CHOICE NVIDIA_DRIVER_TYPE \
            BROWSER_CHOICE
     export -f chroot_configuration
 
