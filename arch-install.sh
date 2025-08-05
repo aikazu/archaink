@@ -1,6 +1,6 @@
 #!/bin/bash
 # ===================================================================================
-#         SKRIP INSTALASI ARCH LINUX OTOMATIS
+#         SKRIP INSTALASI ARCH LINUX OTOMATIS (VERSI ROBUST)
 # ===================================================================================
 # Deskripsi:
 # Skrip ini mengotomatiskan instalasi Arch Linux pada partisi yang sudah ada.
@@ -15,18 +15,14 @@
 set -e
 
 # --- Fungsi Bantuan & Tampilan ---
-# Fungsi ini tetap sama karena sudah bagus dan jelas.
 info() { echo -e "\e[34m[INFO]\e[0m $1"; }
 warning() { echo -e "\e[33m[PERINGATAN]\e[0m $1"; }
 error() { echo -e "\e[31m[ERROR]\e[0m $1"; }
 success() { echo -e "\e[32m[SUKSES]\e[0m $1"; }
 
 # --- Fungsi Cleanup & Error Handling ---
-# Trap akan menjalankan fungsi cleanup jika skrip keluar (EXIT) atau terjadi error (ERR).
 cleanup() {
     warning "Menjalankan cleanup..."
-    # Unmount semua yang ada di /mnt secara rekursif jika termount
-    # Menggunakan `grep -q` untuk memeriksa apakah /mnt ada di output mount
     if mount | grep -q ' on /mnt'; then
         info "Mencoba unmount /mnt secara rekursif..."
         umount -R /mnt || warning "Unmount /mnt gagal, mungkin sudah di-unmount."
@@ -37,32 +33,50 @@ cleanup() {
 }
 trap cleanup EXIT ERR INT TERM
 
-# --- Fungsi Utama ---
+# --- Pemeriksaan Pra-Instalasi ---
+pre_install_checks() {
+    info "Menjalankan pemeriksaan pra-instalasi..."
+    # 1. Periksa mode boot (harus UEFI)
+    if [ ! -d /sys/firmware/efi/efivars ]; then
+        error "Sistem tidak di-boot dalam mode UEFI."
+        error "Skrip ini hanya mendukung instalasi UEFI dengan systemd-boot."
+        exit 1
+    fi
+    success "Sistem di-boot dalam mode UEFI."
+
+    # 2. Periksa koneksi internet
+    if ! ping -c 3 archlinux.org &> /dev/null; then
+        error "Tidak ada koneksi internet. Silakan periksa koneksi Anda."
+        exit 1
+    fi
+    success "Koneksi internet terverifikasi."
+}
+
 
 # ===================================================================================
 # TAHAP 1: PENGUMPULAN INFORMASI DARI PENGGUNA
 # ===================================================================================
 get_user_input() {
-    info "Selamat datang di skrip instalasi Arch Linux"
+    info "Selamat datang di skrip instalasi Arch Linux yang disempurnakan."
     warning "Pastikan Anda sudah memiliki partisi untuk EFI, Swap, Root, dan (opsional) Home."
-    info "Skrip ini tidak akan membuat partisi, hanya memformat yang sudah ada."
     echo ""
 
     lsblk -p -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINT
     echo ""
 
-    # Validasi input partisi yang lebih ketat
+    # Validasi input partisi yang lebih andal
     select_partition() {
         local partition_name=$1
         local partition_var=$2
         local selected_partition
         while true; do
             read -p "Masukkan path partisi ${partition_name} (contoh: /dev/sda1): " selected_partition
-            if lsblk -p -no NAME,TYPE | grep -q "^${selected_partition}.*part$"; then
+            # Menggunakan test -b untuk memeriksa apakah file adalah block device (cara paling andal)
+            if [ -b "${selected_partition}" ]; then
                 eval "$partition_var='${selected_partition}'"
                 break
             else
-                error "Partisi '${selected_partition}' tidak ditemukan atau bukan partisi. Silakan coba lagi."
+                error "Path '${selected_partition}' tidak valid atau bukan block device. Silakan coba lagi."
             fi
         done
     }
@@ -71,7 +85,6 @@ get_user_input() {
     select_partition "Swap" "SWAP_PARTITION"
     select_partition "Root" "ROOT_PARTITION"
 
-    # Opsi untuk partisi Home terpisah
     read -p "Apakah Anda menggunakan partisi Home terpisah? (y/n): " use_home
     if [[ "$use_home" == "y" || "$use_home" == "Y" ]]; then
         select_partition "Home" "HOME_PARTITION"
@@ -79,21 +92,15 @@ get_user_input() {
         HOME_PARTITION=""
     fi
 
-    info "Anda telah memilih partisi berikut:"
-    echo "EFI:    ${EFI_PARTITION}"
-    echo "Swap:   ${SWAP_PARTITION}"
-    echo "Root:   ${ROOT_PARTITION}"
-    [[ -n "$HOME_PARTITION" ]] && echo "Home:   ${HOME_PARTITION}"
-    
-    warning "BAHAYA: Partisi-partisi ini akan DIFORMAT (kecuali Home jika sudah ada isinya)."
-    warning "Semua data akan hilang. Ini adalah kesempatan terakhir untuk membatalkan."
-    read -p "Ketik 'LANJUT' untuk melanjutkan: " CONFIRM_FORMAT
-    if [ "$CONFIRM_FORMAT" != "LANJUT" ]; then
-        error "Instalasi dibatalkan oleh pengguna."
+    # Validasi bahwa semua partisi unik
+    local all_partitions=("$EFI_PARTITION" "$SWAP_PARTITION" "$ROOT_PARTITION")
+    [[ -n "$HOME_PARTITION" ]] && all_partitions+=("$HOME_PARTITION")
+    if [ $(printf "%s\n" "${all_partitions[@]}" | sort | uniq -d | wc -l) -ne 0 ]; then
+        error "Partisi yang sama tidak boleh digunakan untuk beberapa peran. Instalasi dibatalkan."
         exit 1
     fi
+    success "Semua partisi yang dipilih unik."
 
-    # Validasi input hostname dan username
     while true; do
         read -p "Masukkan hostname: " HOSTNAME
         [[ "$HOSTNAME" =~ ^[a-z0-9][a-z0-9-]*[a-z0-9]$ ]] && break || error "Hostname tidak valid."
@@ -104,7 +111,6 @@ get_user_input() {
         [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ && "$USERNAME" != "root" ]] && break || error "Nama pengguna tidak valid."
     done
 
-    # Pengambilan password yang lebih aman (tidak disimpan di variabel global)
     while true; do
         read -sp "Masukkan password untuk root dan pengguna baru: " pass
         echo
@@ -112,10 +118,8 @@ get_user_input() {
         echo
         [[ "$pass" == "$pass_confirm" && -n "$pass" ]] && break || error "Password tidak cocok atau kosong."
     done
-    # Password akan dilewatkan ke fungsi chroot
     PASSWORD="$pass"
 
-    # Pemilihan CPU, DE, Driver, dan Aplikasi Tambahan
     info "Pilih vendor CPU Anda:"
     select CPU_VENDOR in "amd" "intel"; do [[ -n "$CPU_VENDOR" ]] && break || warning "Pilihan tidak valid."; done
 
@@ -132,6 +136,33 @@ get_user_input() {
 
     info "Pilih browser web:"
     select BROWSER_CHOICE in "brave" "firefox" "none"; do [[ -n "$BROWSER_CHOICE" ]] && break || warning "Pilihan tidak valid."; done
+
+    # --- Layar Konfirmasi Akhir ---
+    info "======================================================"
+    info "         RINGKASAN KONFIGURASI INSTALASI          "
+    info "======================================================"
+    echo " > Hostname:          ${HOSTNAME}"
+    echo " > Username:          ${USERNAME}"
+    echo " > CPU Vendor:        ${CPU_VENDOR}"
+    echo " > Desktop:           ${DE_CHOICE}"
+    echo " > Driver Nvidia:     ${NVIDIA_CHOICE}"
+    [[ "$NVIDIA_CHOICE" == "ya" ]] && echo " > Jenis Driver:      ${NVIDIA_DRIVER_TYPE}"
+    echo " > Browser:           ${BROWSER_CHOICE}"
+    info "------------------------------------------------------"
+    info "Partisi yang akan digunakan:"
+    echo " > Partisi EFI:       ${EFI_PARTITION}"
+    echo " > Partisi Swap:      ${SWAP_PARTITION}"
+    echo " > Partisi Root:      ${ROOT_PARTITION}"
+    [[ -n "$HOME_PARTITION" ]] && echo " > Partisi Home:      ${HOME_PARTITION}"
+    info "======================================================"
+    
+    warning "BAHAYA: TINJAU KONFIGURASI DI ATAS DENGAN SEKSAMA."
+    warning "Partisi EFI, Swap, dan Root akan DIFORMAT TOTAL. Data akan hilang."
+    read -p "Ketik 'LANJUT' untuk memulai instalasi: " CONFIRM_FORMAT
+    if [ "$CONFIRM_FORMAT" != "LANJUT" ]; then
+        error "Instalasi dibatalkan oleh pengguna."
+        exit 1
+    fi
 }
 
 # ===================================================================================
@@ -146,7 +177,6 @@ prepare_system() {
     mkswap "${SWAP_PARTITION}"
     mkfs.ext4 "${ROOT_PARTITION}"
     if [[ -n "$HOME_PARTITION" ]]; then
-        # Hanya format partisi home jika diminta atau diperlukan
         read -p "Apakah Anda ingin memformat partisi Home ${HOME_PARTITION}? (y/n): " format_home
         if [[ "$format_home" == "y" || "$format_home" == "Y" ]]; then
             info "Memformat partisi Home..."
@@ -167,7 +197,6 @@ prepare_system() {
     swapon "${SWAP_PARTITION}"
 
     info "Menginstal sistem dasar Arch Linux. Ini mungkin memakan waktu..."
-    # Menambahkan paket umum seperti sudo, git, dan neovim
     pacstrap -K /mnt base linux linux-firmware nano neovim git sudo networkmanager
 
     info "Membuat fstab (menggunakan UUID untuk ketahanan)..."
@@ -178,15 +207,11 @@ prepare_system() {
 # ===================================================================================
 # TAHAP 3: CHROOT DAN KONFIGURASI SISTEM BARU
 # ===================================================================================
-# Ini adalah fungsi yang akan dijalankan DI DALAM chroot.
-# Menggunakan fungsi membuatnya lebih bersih daripada heredoc raksasa.
 chroot_configuration() {
-    set -e # Pastikan chroot juga berhenti jika ada error
+    set -e 
 
-    # Fungsi bantuan khusus untuk di dalam chroot
     info_chroot() { echo -e "\e[36m[CHROOT]\e[0m $1"; }
 
-    # --- Konfigurasi Sistem ---
     info_chroot "Mengatur zona waktu ke Asia/Jakarta..."
     ln -sf /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
     hwclock --systohc
@@ -205,20 +230,15 @@ chroot_configuration() {
 127.0.1.1   ${HOSTNAME}.localdomain ${HOSTNAME}
 HOSTS
 
-    # --- Pengguna dan Password ---
     info_chroot "Mengatur password root..."
-    # Metode yang lebih aman, password tidak muncul di history atau process list
     echo "root:${PASSWORD}" | chpasswd
 
     info_chroot "Membuat pengguna ${USERNAME}..."
     useradd -m -G wheel -s /bin/bash "${USERNAME}"
     echo "${USERNAME}:${PASSWORD}" | chpasswd
     info_chroot "Memberikan hak sudo kepada grup 'wheel'..."
-    # Menggunakan tee untuk menghindari masalah permission redirection
     echo "%wheel ALL=(ALL:ALL) ALL" | tee /etc/sudoers.d/wheel > /dev/null
 
-
-    # --- Layanan dan Bootloader ---
     info_chroot "Mengaktifkan NetworkManager..."
     systemctl enable NetworkManager
 
@@ -235,7 +255,6 @@ HOSTS
     ROOT_PARTUUID=$(blkid -s PARTUUID -o value "${ROOT_PARTITION}")
     KERNEL_OPTIONS="root=PARTUUID=${ROOT_PARTUUID} rw"
     
-    # Menambahkan parameter kernel untuk driver Nvidia
     if [[ "$NVIDIA_CHOICE" == "ya" ]]; then
         KERNEL_OPTIONS+=" nvidia_drm.modeset=1"
     fi
@@ -249,12 +268,8 @@ options ${KERNEL_OPTIONS}
 BOOT_ENTRY
     info_chroot "Bootloader berhasil dikonfigurasi."
 
-    # --- Instalasi Lingkungan Desktop dan Aplikasi ---
-    # Membuat daftar paket berdasarkan pilihan pengguna
     PKGS=()
     AUR_PKGS=()
-
-    # Paket audio dasar untuk semua DE
     PKGS+=(pipewire wireplumber pipewire-pulse pavucontrol)
 
     case "$DE_CHOICE" in
@@ -292,18 +307,14 @@ BOOT_ENTRY
     info_chroot "Menginstal paket-paket yang dipilih: ${PKGS[*]}"
     pacman -S --noconfirm --needed "${PKGS[@]}"
 
-    # --- Instalasi AUR Helper (yay) dan paket AUR ---
     if [ ${#AUR_PKGS[@]} -gt 0 ]; then
         info_chroot "Mempersiapkan instalasi paket dari AUR..."
-        # Instal base-devel. Paket ini akan dipertahankan untuk penggunaan di masa depan.
         info_chroot "Menginstal 'base-devel' untuk membangun paket AUR..."
         pacman -S --noconfirm --needed base-devel
         
-        # Menjalankan blok perintah sebagai pengguna baru untuk keamanan
         sudo -u "${USERNAME}" bash <<USER_SETUP
 set -e
 info_chroot_user() { echo -e "\e[36m[CHROOT-USER]\e[0m \$1"; }
-
 cd /home/"${USERNAME}"
 info_chroot_user "Mengkloning dan menginstal yay (AUR Helper)..."
 git clone https://aur.archlinux.org/yay.git
@@ -311,17 +322,12 @@ cd yay
 makepkg -si --noconfirm
 cd ..
 rm -rf yay
-
 info_chroot_user "Menginstal paket AUR: ${AUR_PKGS[*]}"
 yay -S --noconfirm --needed "${AUR_PKGS[@]}"
 USER_SETUP
-
-        # 'base-devel' tidak dihapus untuk memudahkan pengguna teknis
-        # yang akan sering mengompilasi paket dari AUR di masa mendatang.
         info_chroot "'base-devel' tetap terinstal di sistem."
     fi
 
-    # --- Finalisasi ---
     info_chroot "Mengaktifkan Display Manager..."
     if [[ "$DE_CHOICE" == "Hyprland" || "$DE_CHOICE" == "KDE-Plasma" ]]; then
         systemctl enable sddm
@@ -341,27 +347,20 @@ USER_SETUP
 #                                 EKSEKUSI SKRIP
 # ===================================================================================
 main() {
-    # Tahap 1
+    pre_install_checks
     get_user_input
-
-    # Tahap 2
     prepare_system
-
-    # Tahap 3
+    
     info "Menyalin konfigurasi ke sistem baru dan masuk ke chroot..."
-    # Ekspor variabel dan fungsi agar dapat diakses di dalam chroot
     export EFI_PARTITION SWAP_PARTITION ROOT_PARTITION HOME_PARTITION \
            HOSTNAME USERNAME PASSWORD CPU_VENDOR DE_CHOICE NVIDIA_CHOICE NVIDIA_DRIVER_TYPE \
            BROWSER_CHOICE
     export -f chroot_configuration
 
-    # Menjalankan fungsi konfigurasi di dalam chroot
-    # `arch-chroot` akan menjalankan bash, yang kemudian akan menjalankan fungsi kita
     arch-chroot /mnt /bin/bash -c "chroot_configuration"
 
-    # Tahap 4
-    trap - EXIT ERR INT TERM # Hapus trap sebelum pesan sukses
-    cleanup # Lakukan cleanup terakhir secara manual
+    trap - EXIT ERR INT TERM 
+    cleanup 
 
     success "======================================================"
     success "         INSTALASI ARCH LINUX TELAH SELESAI!          "
@@ -374,5 +373,4 @@ main() {
     reboot
 }
 
-# Jalankan fungsi utama
 main
