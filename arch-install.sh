@@ -43,7 +43,7 @@ trap cleanup EXIT ERR INT TERM
 # TAHAP 1: PENGUMPULAN INFORMASI DARI PENGGUNA
 # ===================================================================================
 get_user_input() {
-    info "Selamat datang di skrip instalasi Arch Linux yang disempurnakan."
+    info "Selamat datang di skrip instalasi Arch Linux"
     warning "Pastikan Anda sudah memiliki partisi untuk EFI, Swap, Root, dan (opsional) Home."
     info "Skrip ini tidak akan membuat partisi, hanya memformat yang sudah ada."
     echo ""
