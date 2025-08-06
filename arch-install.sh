@@ -1,79 +1,100 @@
 #!/bin/bash
 # ===================================================================================
-#         SKRIP INSTALASI ARCH LINUX OTOMATIS (VERSI ROBUST)
-# ===================================================================================
-# Deskripsi:
-# Skrip ini mengotomatiskan instalasi Arch Linux pada partisi yang sudah ada.
-# Ditingkatkan untuk modularitas, keamanan, dan fleksibilitas yang lebih baik.
 #
-# Peringatan:
-# Skrip ini akan MENGHAPUS SEMUA DATA pada partisi yang Anda pilih.
-# Gunakan dengan risiko Anda sendiri. Selalu backup data penting terlebih dahulu.
+#          SKRIP INSTALASI ARCH LINUX OTOMATIS (UEFI)
+#
+#   Deskripsi: Skrip ini mengotomatiskan instalasi Arch Linux pada sistem UEFI.
+#   Peringatan: Skrip ini akan MENGHAPUS DATA pada partisi yang dipilih.
+#              Gunakan dengan risiko Anda sendiri. Tinjau skrip sebelum eksekusi.
+#
 # ===================================================================================
 
-# Keluar segera jika ada perintah yang gagal
-set -e
+# Keluar segera jika ada perintah yang gagal atau variabel yang tidak disetel.
+set -euo pipefail
 
-# --- Fungsi Bantuan & Tampilan ---
-info() { echo -e "\e[34m[INFO]\e[0m $1"; }
-warning() { echo -e "\e[33m[PERINGATAN]\e[0m $1"; }
-error() { echo -e "\e[31m[ERROR]\e[0m $1"; }
-success() { echo -e "\e[32m[SUKSES]\e[0m $1"; }
+# --- Variabel Global & Tampilan ---
+# Menggunakan tput untuk warna dan gaya teks agar lebih portabel dan jelas.
+BOLD=$(tput bold)
+BLUE=$(tput setaf 4)
+GREEN=$(tput setaf 2)
+YELLOW=$(tput setaf 3)
+RED=$(tput setaf 1)
+RESET=$(tput sgr0)
+
+# --- Fungsi Logging ---
+# Fungsi-fungsi ini membantu memberikan output yang terstruktur dan berwarna.
+info() { echo -e "${BLUE}${BOLD}[INFO]${RESET} $1"; }
+warning() { echo -e "${YELLOW}${BOLD}[PERINGATAN]${RESET} $1"; }
+error() { echo -e "${RED}${BOLD}[ERROR]${RESET} $1"; }
+success() { echo -e "${GREEN}${BOLD}[SUKSES]${RESET} $1"; }
 
 # --- Fungsi Cleanup & Error Handling ---
+# Fungsi ini akan selalu dijalankan saat skrip keluar, baik normal maupun karena error.
 cleanup() {
-    warning "Menjalankan cleanup..."
-    if mount | grep -q ' on /mnt'; then
-        info "Mencoba unmount /mnt secara rekursif..."
-        umount -R /mnt || warning "Unmount /mnt gagal, mungkin sudah di-unmount."
+    # Memastikan tidak ada proses yang berjalan di dalam chroot sebelum unmount.
+    fuser -k /mnt &>/dev/null
+    
+    warning "Menjalankan cleanup otomatis..."
+    if mountpoint -q /mnt; then
+        info "Mencoba unmount semua filesystem di /mnt secara rekursif..."
+        # Menggunakan umount -R (rekursif) untuk unmount yang lebih andal.
+        umount -R /mnt || warning "Unmount /mnt gagal. Mungkin sudah di-unmount."
         success "Semua filesystem di /mnt telah di-unmount."
     else
         info "Tidak ada filesystem yang termount di /mnt. Cleanup tidak diperlukan."
     fi
 }
+# Menangkap sinyal exit, error, interupsi, dan terminasi untuk menjalankan cleanup.
 trap cleanup EXIT ERR INT TERM
 
 # --- Pemeriksaan Pra-Instalasi ---
+# Memastikan lingkungan sudah siap sebelum memulai proses instalasi.
 pre_install_checks() {
     info "Menjalankan pemeriksaan pra-instalasi..."
-    # 1. Periksa mode boot (harus UEFI)
+    
+    # 1. Verifikasi mode boot UEFI
     if [ ! -d /sys/firmware/efi/efivars ]; then
-        error "Sistem tidak di-boot dalam mode UEFI."
-        error "Skrip ini hanya mendukung instalasi UEFI dengan systemd-boot."
+        error "Sistem tidak di-boot dalam mode UEFI. Skrip ini hanya mendukung instalasi UEFI."
         exit 1
     fi
     success "Sistem di-boot dalam mode UEFI."
 
-    # 2. Periksa koneksi internet
-    if ! ping -c 3 archlinux.org &> /dev/null; then
-        error "Tidak ada koneksi internet. Silakan periksa koneksi Anda."
+    # 2. Verifikasi koneksi internet
+    if ! ping -c 1 archlinux.org &> /dev/null; then
+        error "Tidak ada koneksi internet. Silakan periksa koneksi Anda dan coba lagi."
         exit 1
     fi
     success "Koneksi internet terverifikasi."
+    
+    # 3. Verifikasi perintah penting
+    if ! command -v arch-chroot &> /dev/null; then
+        error "Perintah 'arch-chroot' tidak ditemukan. Pastikan Anda menjalankan skrip ini dari Arch Linux live environment."
+        exit 1
+    fi
+    success "Lingkungan instalasi Arch terverifikasi."
 }
-
 
 # ===================================================================================
 # TAHAP 1: PENGUMPULAN INFORMASI DARI PENGGUNA
 # ===================================================================================
 get_user_input() {
-    info "Selamat datang di skrip instalasi Arch Linux yang disempurnakan."
-    warning "Pastikan Anda sudah memiliki partisi untuk EFI, Swap, Root, dan (opsional) Home."
+    info "Selamat datang di skrip instalasi Arch Linux."
+    warning "Pastikan Anda sudah menyiapkan partisi untuk EFI, Swap, dan Root."
     echo ""
 
-    lsblk -p -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINT
-    echo ""
+    # Menampilkan daftar block device untuk membantu pengguna memilih.
+    lsblk -p -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINT,LABEL
+    echo "------------------------------------------------------------------"
 
-    # Validasi input partisi yang lebih andal
+    # Fungsi pembantu untuk memilih partisi dengan validasi.
     select_partition() {
         local partition_name=$1
-        local partition_var=$2
         local selected_partition
         while true; do
-            read -p "Masukkan path partisi ${partition_name} (contoh: /dev/sda1): " selected_partition
-            # Menggunakan test -b untuk memeriksa apakah file adalah block device (cara paling andal)
+            read -p "-> Masukkan path partisi ${partition_name} (contoh: /dev/sda1): " selected_partition
             if [ -b "${selected_partition}" ]; then
-                eval "$partition_var='${selected_partition}'"
+                # Menggunakan 'declare -g' untuk membuat variabel menjadi global.
+                declare -g "$2=${selected_partition}"
                 break
             else
                 error "Path '${selected_partition}' tidak valid atau bukan block device. Silakan coba lagi."
@@ -85,58 +106,96 @@ get_user_input() {
     select_partition "Swap" "SWAP_PARTITION"
     select_partition "Root" "ROOT_PARTITION"
 
-    read -p "Apakah Anda menggunakan partisi Home terpisah? (y/n): " use_home
-    if [[ "$use_home" == "y" || "$use_home" == "Y" ]]; then
+    read -p "-> Apakah Anda menggunakan partisi Home terpisah? (y/n): " use_home
+    if [[ "$use_home" =~ ^[Yy]$ ]]; then
         select_partition "Home" "HOME_PARTITION"
     else
         HOME_PARTITION=""
     fi
 
-    # Validasi bahwa semua partisi unik
+    # Validasi untuk memastikan tidak ada partisi yang sama digunakan untuk peran berbeda.
     local all_partitions=("$EFI_PARTITION" "$SWAP_PARTITION" "$ROOT_PARTITION")
     [[ -n "$HOME_PARTITION" ]] && all_partitions+=("$HOME_PARTITION")
-    if [ $(printf "%s\n" "${all_partitions[@]}" | sort | uniq -d | wc -l) -ne 0 ]; then
+    if [ $(printf "%s\n" "${all_partitions[@]}" | sort -u | wc -l) -ne ${#all_partitions[@]} ]; then
         error "Partisi yang sama tidak boleh digunakan untuk beberapa peran. Instalasi dibatalkan."
         exit 1
     fi
     success "Semua partisi yang dipilih unik."
 
+    # Input Hostname dengan validasi.
     while true; do
-        read -p "Masukkan hostname: " HOSTNAME
-        [[ "$HOSTNAME" =~ ^[a-z0-9][a-z0-9-]*[a-z0-9]$ ]] && break || error "Hostname tidak valid."
+        read -p "-> Masukkan hostname: " HOSTNAME
+        if [[ "$HOSTNAME" =~ ^[a-z0-9][a-z0-9-]*[a-z0-9]$ ]]; then
+            break
+        else
+            error "Hostname tidak valid. Gunakan hanya huruf kecil, angka, dan hyphen (-), tanpa spasi."
+        fi
     done
 
+    # Input Username dengan validasi.
     while true; do
-        read -p "Masukkan nama pengguna baru (huruf kecil): " USERNAME
-        [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ && "$USERNAME" != "root" ]] && break || error "Nama pengguna tidak valid."
+        read -p "-> Masukkan nama pengguna baru (huruf kecil): " USERNAME
+        if [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ && "$USERNAME" != "root" ]]; then
+            break
+        else
+            error "Nama pengguna tidak valid. Gunakan huruf kecil, angka, underscore, atau hyphen."
+        fi
     done
 
+    # Input Password dengan konfirmasi.
     while true; do
-        read -sp "Masukkan password untuk root dan pengguna baru: " pass
+        read -s -p "-> Masukkan password untuk root dan pengguna baru: " PASSWORD
         echo
-        read -sp "Konfirmasi password: " pass_confirm
+        read -s -p "-> Konfirmasi password: " PASSWORD_CONFIRM
         echo
-        [[ "$pass" == "$pass_confirm" && -n "$pass" ]] && break || error "Password tidak cocok atau kosong."
+        if [[ "$PASSWORD" == "$PASSWORD_CONFIRM" && -n "$PASSWORD" ]]; then
+            break
+        else
+            error "Password tidak cocok atau kosong. Silakan coba lagi."
+        fi
     done
-    PASSWORD="$pass"
 
-    # Pertanyaan vendor CPU dihapus, akan dideteksi otomatis.
-
+    # Pilihan Desktop Environment (DE) menggunakan 'select'.
     info "Pilih Desktop Environment:"
-    select DE_CHOICE in "Hyprland" "KDE-Plasma" "GNOME"; do [[ -n "$DE_CHOICE" ]] && break || warning "Pilihan tidak valid."; done
+    PS3="   Pilihan Anda: "
+    select DE_CHOICE in "Hyprland" "KDE-Plasma" "GNOME" "None"; do
+        [[ -n "$DE_CHOICE" ]] && break || warning "Pilihan tidak valid."
+    done
 
-    info "Apakah Anda ingin menginstal driver Nvidia?"
-    select NVIDIA_CHOICE in "ya" "tidak"; do [[ -n "$NVIDIA_CHOICE" ]] && break || warning "Pilihan tidak valid."; done
+    # Pilihan driver Nvidia.
+    info "Apakah Anda menggunakan kartu grafis Nvidia?"
+    select NVIDIA_CHOICE in "ya" "tidak"; do
+        [[ -n "$NVIDIA_CHOICE" ]] && break || warning "Pilihan tidak valid."
+    done
     
+    # Pilihan jenis driver Nvidia jika diperlukan.
     if [[ "$NVIDIA_CHOICE" == "ya" ]]; then
         info "Pilih jenis driver Nvidia:"
-        select NVIDIA_DRIVER_TYPE in "nvidia (untuk kernel standar)" "nvidia-dkms (untuk kernel custom/lts)"; do [[ -n "$NVIDIA_DRIVER_TYPE" ]] && break || warning "Pilihan tidak valid."; done
+        select NVIDIA_DRIVER_TYPE in "nvidia (untuk kernel standar)" "nvidia-dkms (untuk kernel custom/lts)"; do
+            [[ -n "$NVIDIA_DRIVER_TYPE" ]] && break || warning "Pilihan tidak valid."
+        done
+    else
+        NVIDIA_DRIVER_TYPE=""
     fi
 
-    info "Pilih browser web:"
-    select BROWSER_CHOICE in "brave" "firefox" "none"; do [[ -n "$BROWSER_CHOICE" ]] && break || warning "Pilihan tidak valid."; done
+    # Opsi untuk instalasi AUR
+    info "Apakah Anda ingin menginstal AUR Helper (yay) dan beberapa paket populer dari AUR?"
+    warning "Paket AUR dibuat oleh komunitas dan tidak didukung secara resmi oleh Arch Linux."
+    select INSTALL_AUR in "ya" "tidak"; do
+        [[ -n "$INSTALL_AUR" ]] && break || warning "Pilihan tidak valid."
+    done
 
-    # --- Layar Konfirmasi Akhir ---
+    AUR_PACKAGES=()
+    if [[ "$INSTALL_AUR" == "ya" ]]; then
+        # Daftar paket AUR yang akan diinstal. Bisa dimodifikasi sesuai kebutuhan.
+        AUR_PACKAGES+=("brave-bin" "code")
+        # Tambahkan tema sddm jika Hyprland atau KDE Plasma dipilih
+        if [[ "$DE_CHOICE" == "Hyprland" || "$DE_CHOICE" == "KDE-Plasma" ]]; then
+            AUR_PACKAGES+=("sddm-astronaut-theme")
+        fi
+    fi
+
+    # Ringkasan konfigurasi sebelum melanjutkan.
     info "======================================================"
     info "         RINGKASAN KONFIGURASI INSTALASI          "
     info "======================================================"
@@ -144,8 +203,11 @@ get_user_input() {
     echo " > Username:          ${USERNAME}"
     echo " > Desktop:           ${DE_CHOICE}"
     echo " > Driver Nvidia:     ${NVIDIA_CHOICE}"
-    [[ "$NVIDIA_CHOICE" == "ya" ]] && echo " > Jenis Driver:      ${NVIDIA_DRIVER_TYPE}"
-    echo " > Browser:           ${BROWSER_CHOICE}"
+    [[ "$NVIDIA_CHOICE" == "ya" ]] && echo " > Jenis Driver:      ${NVIDIA_DRIVER_TYPE%% *}"
+    echo " > Instalasi AUR:     ${INSTALL_AUR}"
+    if [[ "$INSTALL_AUR" == "ya" ]]; then
+        echo " > Paket AUR:         ${AUR_PACKAGES[*]}"
+    fi
     info "------------------------------------------------------"
     info "Partisi yang akan digunakan:"
     echo " > Partisi EFI:       ${EFI_PARTITION}"
@@ -154,10 +216,25 @@ get_user_input() {
     [[ -n "$HOME_PARTITION" ]] && echo " > Partisi Home:      ${HOME_PARTITION}"
     info "======================================================"
     
-    warning "BAHAYA: TINJAU KONFIGURASI DI ATAS DENGAN SEKSAMA."
-    warning "Partisi EFI, Swap, dan Root akan DIFORMAT TOTAL. Data akan hilang."
-    read -p "Ketik 'LANJUT' untuk memulai instalasi: " CONFIRM_FORMAT
-    if [ "$CONFIRM_FORMAT" != "LANJUT" ]; then
+    warning "PERHATIAN: TINJAU KONFIGURASI DI ATAS DENGAN SEKSAMA."
+    error "PROSES BERIKUTNYA AKAN MEMFORMAT PARTISI EFI, SWAP, DAN ROOT."
+    error "SEMUA DATA PADA PARTISI TERSEBUT AKAN HILANG PERMANEN."
+    
+    if [[ -n "$HOME_PARTITION" ]]; then
+        read -p "-> Apakah Anda ingin memformat partisi Home (${HOME_PARTITION})? (y/n): " format_home
+        if [[ "$format_home" =~ ^[Yy]$ ]]; then
+            FORMAT_HOME="yes"
+            error "Partisi Home (${HOME_PARTITION}) JUGA AKAN DIFORMAT."
+        else
+            FORMAT_HOME="no"
+            warning "Partisi Home (${HOME_PARTITION}) TIDAK akan diformat."
+        fi
+    else
+        FORMAT_HOME="no"
+    fi
+
+    read -p "Ketik 'LANJUTKAN' untuk memulai instalasi: " CONFIRM_INSTALL
+    if [ "$CONFIRM_INSTALL" != "LANJUTKAN" ]; then
         error "Instalasi dibatalkan oleh pengguna."
         exit 1
     fi
@@ -168,233 +245,245 @@ get_user_input() {
 # ===================================================================================
 prepare_system() {
     info "Memulai proses persiapan sistem..."
+    
+    # Sinkronisasi jam sistem.
+    timedatectl set-local-rtc 1
     timedatectl set-ntp true
 
     info "Memformat partisi..."
-    mkfs.fat -F32 "${EFI_PARTITION}"
-    mkswap "${SWAP_PARTITION}"
-    mkfs.ext4 "${ROOT_PARTITION}"
-    if [[ -n "$HOME_PARTITION" ]]; then
-        read -p "Apakah Anda ingin memformat partisi Home ${HOME_PARTITION}? (y/n): " format_home
-        if [[ "$format_home" == "y" || "$format_home" == "Y" ]]; then
-            info "Memformat partisi Home..."
-            mkfs.ext4 "${HOME_PARTITION}"
-        else
-            warning "Partisi Home tidak diformat."
-        fi
+    mkfs.fat -F32 -n "EFISYS" "${EFI_PARTITION}"
+    mkswap -L "SWAP" "${SWAP_PARTITION}"
+    mkfs.ext4 -L "ROOT" "${ROOT_PARTITION}"
+    if [[ "$FORMAT_HOME" == "yes" ]]; then
+        info "Memformat partisi Home..."
+        mkfs.ext4 -L "HOME" "${HOME_PARTITION}"
     fi
+    success "Pemformatan partisi selesai."
 
     info "Mounting sistem file..."
     mount "${ROOT_PARTITION}" /mnt
-    mkdir -p /mnt/boot
-    mount "${EFI_PARTITION}" /mnt/boot
+    mount --mkdir "${EFI_PARTITION}" /mnt/boot
     if [[ -n "$HOME_PARTITION" ]]; then
-        mkdir -p /mnt/home
-        mount "${HOME_PARTITION}" /mnt/home
+        mount --mkdir "${HOME_PARTITION}" /mnt/home
     fi
     swapon "${SWAP_PARTITION}"
+    success "Sistem file berhasil di-mount."
 
-    info "Menginstal sistem dasar Arch Linux. Ini mungkin memakan waktu..."
+    info "Menginstal sistem dasar Arch Linux (base, linux, linux-firmware)..."
+    info "Ini mungkin memakan waktu cukup lama tergantung koneksi internet."
     pacstrap -K /mnt base linux linux-firmware nano neovim git sudo networkmanager
+    success "Sistem dasar berhasil diinstal."
 
-    info "Membuat fstab (menggunakan UUID untuk ketahanan)..."
+    info "Membuat file fstab (menggunakan UUID untuk ketahanan)..."
     genfstab -U /mnt >> /mnt/etc/fstab
-    success "Persiapan sistem selesai."
+    success "File fstab berhasil dibuat."
 }
 
 # ===================================================================================
 # TAHAP 3: CHROOT DAN KONFIGURASI SISTEM BARU
 # ===================================================================================
-chroot_configuration() {
-    set -e 
+run_chroot_config() {
+    info "Memulai konfigurasi di dalam chroot..."
 
-    info_chroot() { echo -e "\e[36m[CHROOT]\e[0m $1"; }
+    # Mengonversi array paket AUR menjadi string yang akan dilewatkan ke chroot.
+    local AUR_PACKAGES_STRING="${AUR_PACKAGES[*]}"
 
-    info_chroot "Mengatur zona waktu ke Asia/Jakarta..."
-    ln -sf /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
-    hwclock --systohc
+    # Menggunakan 'Here Document' (<<EOF) untuk menjalankan serangkaian perintah di dalam chroot.
+    arch-chroot /mnt /bin/bash <<EOF
+# Keluar segera jika ada perintah yang gagal di dalam chroot
+set -euo pipefail
 
-    info_chroot "Mengatur locale (en_US dan id_ID)..."
-    sed -i '/^#en_US.UTF-8/s/^#//' /etc/locale.gen
-    sed -i '/^#id_ID.UTF-8/s/^#//' /etc/locale.gen
-    locale-gen
-    echo "LANG=en_US.UTF-8" > /etc/locale.conf
+# --- Fungsi Logging di dalam Chroot ---
+info_chroot() { echo -e "\e[1;34m[CHROOT-INFO]\e[0m \$1"; }
+warn_chroot() { echo -e "\e[1;33m[CHROOT-WARN]\e[0m \$1"; }
 
-    info_chroot "Mengatur hostname..."
-    echo "${HOSTNAME}" > /etc/hostname
-    cat <<HOSTS > /etc/hosts
+info_chroot "Mengatur zona waktu ke Asia/Jakarta..."
+ln -sf /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
+hwclock --systohc
+
+info_chroot "Mengatur locale (en_US.UTF-8 dan id_ID.UTF-8)..."
+sed -i '/^#en_US.UTF-8/s/^#//' /etc/locale.gen
+sed -i '/^#id_ID.UTF-8/s/^#//' /etc/locale.gen
+locale-gen
+echo "LANG=en_US.UTF-8" > /etc/locale.conf
+
+info_chroot "Mengatur hostname dan file hosts..."
+echo "${HOSTNAME}" > /etc/hostname
+cat > /etc/hosts <<HOSTS
 127.0.0.1   localhost
 ::1         localhost
 127.0.1.1   ${HOSTNAME}.localdomain ${HOSTNAME}
 HOSTS
 
-    info_chroot "Mengatur password root..."
-    echo "root:${PASSWORD}" | chpasswd
+info_chroot "Mengatur password untuk user 'root'..."
+echo "root:${PASSWORD}" | chpasswd
 
-    info_chroot "Membuat pengguna ${USERNAME}..."
-    useradd -m -G wheel -s /bin/bash "${USERNAME}"
-    echo "${USERNAME}:${PASSWORD}" | chpasswd
-    info_chroot "Memberikan hak sudo kepada grup 'wheel'..."
-    echo "%wheel ALL=(ALL:ALL) ALL" | tee /etc/sudoers.d/wheel > /dev/null
+info_chroot "Membuat pengguna baru '${USERNAME}'..."
+useradd -m -G wheel -s /bin/bash "${USERNAME}"
+echo "${USERNAME}:${PASSWORD}" | chpasswd
+info_chroot "Memberikan hak sudo kepada grup 'wheel'..."
+sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
-    info_chroot "Mengaktifkan NetworkManager..."
-    systemctl enable NetworkManager
+info_chroot "Mengaktifkan layanan NetworkManager..."
+systemctl enable NetworkManager
 
-    # --- Deteksi Otomatis dan Instalasi Microcode ---
-    info_chroot "Mendeteksi vendor CPU untuk instalasi microcode..."
-    CPU_VENDOR_DETECTED=$(lscpu | grep "Vendor ID" | awk '{print $3}')
-    MICROCODE_PKG=""
-    CPU_VENDOR_NAME=""
-    if [[ "$CPU_VENDOR_DETECTED" == "GenuineIntel" ]]; then
-        info_chroot "CPU Intel terdeteksi. Menginstal intel-ucode..."
-        MICROCODE_PKG="intel-ucode"
-        CPU_VENDOR_NAME="intel"
-    elif [[ "$CPU_VENDOR_DETECTED" == "AuthenticAMD" ]]; then
-        info_chroot "CPU AMD terdeteksi. Menginstal amd-ucode..."
-        MICROCODE_PKG="amd-ucode"
-        CPU_VENDOR_NAME="amd"
+info_chroot "Mendeteksi vendor CPU untuk instalasi microcode..."
+CPU_VENDOR=\$(lscpu | grep "Vendor ID" | awk '{print \$3}')
+MICROCODE_PKG=""
+if [[ "\$CPU_VENDOR" == "GenuineIntel" ]]; then
+    info_chroot "CPU Intel terdeteksi. Menambahkan intel-ucode."
+    MICROCODE_PKG="intel-ucode"
+elif [[ "\$CPU_VENDOR" == "AuthenticAMD" ]]; then
+    info_chroot "CPU AMD terdeteksi. Menambahkan amd-ucode."
+    MICROCODE_PKG="amd-ucode"
+else
+    warn_chroot "Vendor CPU tidak dapat dideteksi. Melewatkan instalasi microcode."
+fi
+
+info_chroot "Menginstal dan mengonfigurasi bootloader (systemd-boot)..."
+pacman -S --noconfirm --needed \$MICROCODE_PKG
+bootctl install
+
+echo "default arch.conf" > /boot/loader/loader.conf
+echo "timeout 3" >> /boot/loader/loader.conf
+echo "editor no" >> /boot/loader/loader.conf
+
+ROOT_PARTUUID=\$(blkid -s PARTUUID -o value "${ROOT_PARTITION}")
+KERNEL_OPTIONS="root=PARTUUID=\${ROOT_PARTUUID} rw"
+
+if [[ "${NVIDIA_CHOICE}" == "ya" ]]; then
+    KERNEL_OPTIONS+=" nvidia_drm.modeset=1"
+fi
+
+cat > /boot/loader/entries/arch.conf <<ENTRY
+title   Arch Linux
+linux   /vmlinuz-linux
+initrd  /\${MICROCODE_PKG}.img
+initrd  /initramfs-linux.img
+options \${KERNEL_OPTIONS}
+ENTRY
+info_chroot "Bootloader systemd-boot berhasil dikonfigurasi."
+
+info_chroot "Mempersiapkan daftar paket untuk diinstal..."
+PKGS_TO_INSTALL=()
+PKGS_TO_INSTALL+=(pipewire wireplumber pipewire-pulse pavucontrol) # Audio stack
+PKGS_TO_INSTALL+=(fastfetch htop file-roller unzip p7zip man-db bash-completion) # Utilitas dasar
+PKGS_TO_INSTALL+=(qt6-svg qt6-virtualkeyboard qt6-multimedia-ffmpeg) # Ketergantungan untuk tema SDDM
+
+case "${DE_CHOICE}" in
+    "Hyprland")
+        PKGS_TO_INSTALL+=(hyprland xdg-desktop-portal-hyprland xorg-xwayland waybar kitty wofi thunar sddm qt6-wayland)
+        ;;
+    "KDE-Plasma")
+        PKGS_TO_INSTALL+=(plasma-meta kde-applications sddm konsole dolphin)
+        ;;
+    "GNOME")
+        PKGS_TO_INSTALL+=(gnome gnome-tweaks gdm)
+        ;;
+    "None")
+        info_chroot "Tidak ada Desktop Environment yang dipilih."
+        ;;
+esac
+
+if [[ "${NVIDIA_CHOICE}" == "ya" ]]; then
+    if [[ "${NVIDIA_DRIVER_TYPE}" == "nvidia-dkms"* ]]; then
+        PKGS_TO_INSTALL+=(linux-headers nvidia-dkms nvidia-utils lib32-nvidia-utils)
     else
-        warning "Vendor CPU tidak dapat dideteksi. Melewatkan instalasi microcode."
+        PKGS_TO_INSTALL+=(nvidia nvidia-utils lib32-nvidia-utils)
     fi
+fi
 
-    # Sinkronkan database paket sebelum instalasi apapun untuk menghindari error "target not found"
-    info_chroot "Menyinkronkan database paket..."
-    pacman -Sy
+PKGS_TO_INSTALL+=(noto-fonts noto-fonts-cjk noto-fonts-emoji noto-fonts-extra nerd-fonts)
 
-    if [[ -n "$MICROCODE_PKG" ]]; then
-        pacman -S --noconfirm --needed "$MICROCODE_PKG"
-    fi
+info_chroot "Menyinkronkan database paket dan menginstal paket tambahan..."
+pacman -Syu --noconfirm --needed "\${PKGS_TO_INSTALL[@]}"
 
-    info_chroot "Menginstal dan mengonfigurasi bootloader (systemd-boot)..."
-    bootctl --path=/boot install
+# --- Instalasi AUR (jika dipilih) ---
+if [[ "${INSTALL_AUR}" == "ya" ]]; then
+    info_chroot "Mempersiapkan instalasi paket AUR sebagai pengguna '${USERNAME}'..."
+    # Install dependencies needed to build packages. base-devel is crucial.
+    pacman -S --noconfirm --needed base-devel
 
-    echo "default arch.conf" > /boot/loader/loader.conf
-    echo "timeout 3" >> /boot/loader/loader.conf
-    echo "editor no" >> /boot/loader/loader.conf
+    # Create a temporary script to be run as the new user
+    cat > /home/${USERNAME}/install_aur.sh <<'AUR_SCRIPT'
+#!/bin/bash
+set -euo pipefail
 
-    ROOT_PARTUUID=$(blkid -s PARTUUID -o value "${ROOT_PARTITION}")
-    KERNEL_OPTIONS="root=PARTUUID=${ROOT_PARTUUID} rw"
-    
-    if [[ "$NVIDIA_CHOICE" == "ya" ]]; then
-        KERNEL_OPTIONS+=" nvidia_drm.modeset=1"
-    fi
-
-    # Membuat entri bootloader secara dinamis
-    echo "title   Arch Linux" > /boot/loader/entries/arch.conf
-    echo "linux   /vmlinuz-linux" >> /boot/loader/entries/arch.conf
-    # Menambahkan initrd untuk microcode hanya jika terinstal
-    if [[ -n "$CPU_VENDOR_NAME" ]]; then
-        echo "initrd  /${CPU_VENDOR_NAME}-ucode.img" >> /boot/loader/entries/arch.conf
-    fi
-    echo "initrd  /initramfs-linux.img" >> /boot/loader/entries/arch.conf
-    echo "options ${KERNEL_OPTIONS}" >> /boot/loader/entries/arch.conf
-    info_chroot "Bootloader berhasil dikonfigurasi."
-
-    PKGS=()
-    AUR_PKGS=()
-    PKGS+=(pipewire wireplumber pipewire-pulse pavucontrol)
-
-    case "$DE_CHOICE" in
-        "Hyprland")
-            PKGS+=(hyprland xdg-desktop-portal-hyprland xorg-xwayland waybar kitty wofi thunar thunar-archive-plugin ttf-jetbrains-mono-nerd noto-fonts-emoji sddm)
-            AUR_PKGS+=(sddm-theme-corners-git)
-            ;;
-        "KDE-Plasma")
-            PKGS+=(plasma-meta kde-applications sddm konsole dolphin)
-            ;;
-        "GNOME")
-            PKGS+=(gnome gnome-tweaks gdm)
-            ;;
-    esac
-
-    if [[ "$NVIDIA_CHOICE" == "ya" ]]; then
-        if [[ "$NVIDIA_DRIVER_TYPE" == "nvidia-dkms"* ]]; then
-            PKGS+=(linux-headers nvidia-dkms nvidia-utils nvidia-settings)
-        else
-            PKGS+=(nvidia nvidia-utils nvidia-settings)
-        fi
-    fi
-    
-    case "$BROWSER_CHOICE" in
-        "brave")
-            AUR_PKGS+=(brave-bin)
-            ;;
-        "firefox")
-            PKGS+=(firefox)
-            ;;
-    esac
-
-    # Mengganti neofetch dengan fastfetch
-    PKGS+=(fastfetch htop file-roller unzip p7zip)
-
-    info_chroot "Menginstal paket-paket yang dipilih: ${PKGS[*]}"
-    pacman -S --noconfirm --needed "${PKGS[@]}"
-
-    if [ ${#AUR_PKGS[@]} -gt 0 ]; then
-        info_chroot "Mempersiapkan instalasi paket dari AUR..."
-        info_chroot "Menginstal 'base-devel' untuk membangun paket AUR..."
-        pacman -S --noconfirm --needed base-devel
-        
-        sudo -u "${USERNAME}" bash <<USER_SETUP
-set -e
-info_chroot_user() { echo -e "\e[36m[CHROOT-USER]\e[0m \$1"; }
-cd /home/"${USERNAME}"
-info_chroot_user "Mengkloning dan menginstal yay (AUR Helper)..."
+echo "[AUR-HELPER] Memulai instalasi yay (AUR Helper)..."
+cd /tmp
 git clone https://aur.archlinux.org/yay.git
+chown -R ${USERNAME}:${USERNAME} /tmp/yay
 cd yay
+# Build and install yay. makepkg needs to be run as a non-root user.
 makepkg -si --noconfirm
-cd ..
-rm -rf yay
-info_chroot_user "Menginstal paket AUR: ${AUR_PKGS[*]}"
-yay -S --noconfirm --needed "${AUR_PKGS[@]}"
-USER_SETUP
-        info_chroot "'base-devel' tetap terinstal di sistem."
-    fi
+cd /
+rm -rf /tmp/yay
 
-    info_chroot "Mengaktifkan Display Manager..."
-    if [[ "$DE_CHOICE" == "Hyprland" || "$DE_CHOICE" == "KDE-Plasma" ]]; then
-        systemctl enable sddm
-        if [[ "$DE_CHOICE" == "Hyprland" && " ${AUR_PKGS[*]} " =~ " sddm-theme-corners-git " ]]; then
-            mkdir -p /etc/sddm.conf.d
-            echo -e "[Theme]\nCurrent=corners" > /etc/sddm.conf.d/theme.conf
-            info_chroot "Tema SDDM 'corners' telah diaktifkan."
-        fi
-    elif [[ "$DE_CHOICE" == "GNOME" ]]; then
-        systemctl enable gdm
-    fi
+echo "[AUR-HELPER] Menginstal paket AUR yang dipilih..."
+# Convert the space-separated string back to an array
+AUR_PKGS_ARRAY=(${AUR_PACKAGES_TO_INSTALL})
+if [ \${#AUR_PKGS_ARRAY[@]} -gt 0 ]; then
+    yay -S --noconfirm --needed "\${AUR_PKGS_ARRAY[@]}"
+else
+    echo "[AUR-HELPER] Tidak ada paket AUR yang dipilih untuk diinstal."
+fi
 
-    info_chroot "Konfigurasi di dalam chroot selesai."
+echo "[AUR-HELPER] Membersihkan cache build yang tidak diperlukan..."
+yay -Sc --noconfirm
+
+echo "[AUR-HELPER] Instalasi dan cleanup paket AUR selesai."
+AUR_SCRIPT
+
+    # Set correct ownership for the script
+    chown ${USERNAME}:${USERNAME} /home/${USERNAME}/install_aur.sh
+    chmod +x /home/${USERNAME}/install_aur.sh
+
+    info_chroot "Menjalankan skrip instalasi AUR sebagai pengguna '${USERNAME}'..."
+    # This is the secure part: run the script as the non-root user
+    su - "${USERNAME}" -c "AUR_PACKAGES_TO_INSTALL='${AUR_PACKAGES_STRING}' /home/${USERNAME}/install_aur.sh"
+    
+    # Clean up the script
+    rm /home/${USERNAME}/install_aur.sh
+fi
+
+info_chroot "Mengaktifkan Display Manager..."
+if [[ "${DE_CHOICE}" == "Hyprland" || "${DE_CHOICE}" == "KDE-Plasma" ]]; then
+    systemctl enable sddm
+    # Konfigurasi tema SDDM jika Hyprland/KDE dan instalasi AUR dipilih
+    if [[ ( "${DE_CHOICE}" == "Hyprland" || "${DE_CHOICE}" == "KDE-Plasma" ) && "${INSTALL_AUR}" == "ya" ]]; then
+        info_chroot "Mengonfigurasi tema SDDM 'sddm-astronaut-theme'..."
+        echo -e "[Theme]\nCurrent=sddm-astronaut-theme" > /etc/sddm.conf
+        mkdir -p /etc/sddm.conf.d
+        echo -e "[General]\nInputMethod=qtvirtualkeyboard" > /etc/sddm.conf.d/virtualkbd.conf
+        info_chroot "Tema SDDM dan keyboard virtual telah dikonfigurasi."
+    fi
+elif [[ "${DE_CHOICE}" == "GNOME" ]]; then
+    systemctl enable gdm
+fi
+
+info_chroot "Konfigurasi di dalam chroot selesai."
+EOF
+    success "Konfigurasi chroot berhasil diselesaikan."
 }
 
 # ===================================================================================
-#                                 EKSEKUSI SKRIP
+#                                 FUNGSI UTAMA
 # ===================================================================================
 main() {
     pre_install_checks
     get_user_input
     prepare_system
-    
-    info "Menyalin konfigurasi ke sistem baru dan masuk ke chroot..."
-    # Variabel CPU_VENDOR tidak perlu diekspor lagi
-    export EFI_PARTITION SWAP_PARTITION ROOT_PARTITION HOME_PARTITION \
-           HOSTNAME USERNAME PASSWORD DE_CHOICE NVIDIA_CHOICE NVIDIA_DRIVER_TYPE \
-           BROWSER_CHOICE
-    export -f chroot_configuration
-
-    arch-chroot /mnt /bin/bash -c "chroot_configuration"
-
-    trap - EXIT ERR INT TERM 
-    cleanup 
+    run_chroot_config
 
     success "======================================================"
     success "         INSTALASI ARCH LINUX TELAH SELESAI!          "
     success "======================================================"
-    info "Sistem akan di-reboot dalam 10 detik."
-    info "Keluarkan media instalasi Anda sekarang."
-    info "Login dengan pengguna: ${USERNAME}"
+    info "Sistem siap untuk di-reboot. Keluarkan media instalasi Anda."
+    info "Setelah reboot, login dengan pengguna: ${BOLD}${USERNAME}${RESET}"
     
-    sleep 10
+    read -p "Tekan [Enter] untuk reboot sekarang, atau Ctrl+C untuk keluar ke shell..."
     reboot
 }
 
+# Jalankan fungsi utama skrip
 main
